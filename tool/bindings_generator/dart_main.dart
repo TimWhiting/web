@@ -26,7 +26,7 @@ Future<void> _generateAndWriteBindings(String dir) async {
   ensureDirectoryExists('$dir/$librarySubDir');
   final bindings = await generateBindings(packageRoot, librarySubDir);
   for (var entry in bindings.entries) {
-    final formattedContents = _runDartFormat(entry.value).toJS;
+    final formattedContents = entry.value.toJS;
     fs.writeFileSync('$dir/${entry.key}'.toJS, formattedContents);
   }
 }
