@@ -30,7 +30,7 @@ void ensureDirectoryExists(String dir) {
 final int year = DateTime.now().year;
 
 final List<String> licenseHeader = [
-  'Copyright (c) $year, the Dart project authors.  Please see the AUTHORS file',
+  'Copyright (c) $year, the Koka project authors.  Please see the AUTHORS file',
   'for details. All rights reserved. Use of this source code is governed by a',
   'BSD-style license that can be found in the LICENSE file.',
 ];
@@ -38,7 +38,8 @@ final List<String> licenseHeader = [
 extension StringExt on String {
   String get kebabToSnake => toLowerCase().replaceAll('-', '_');
 
-  String get snakeToPascal => replaceAllMapped(
+  String get snakeToPascal => capitalize(snakeToCamel);
+  String get snakeToCamel => replaceAllMapped(
         _snakeBit,
         (match) => match[0]!.toUpperCase(),
       ).replaceAll('_', '');
@@ -50,3 +51,12 @@ const packageRoot = 'package:web';
 
 String capitalize(String s) =>
     s.isEmpty ? '' : '${s[0].toUpperCase()}${s.substring(1)}';
+
+String lower(String s) =>
+    s.isEmpty ? '' : '${s[0].toLowerCase()}${lowerRest(s.substring(1))}';
+String lowerRest(String s){
+  if(s.isEmpty) return '';
+  if (s.length == 1) return s;
+  if (s[1].toLowerCase() == s[1]) return s;
+  return '${s[0].toLowerCase()}${lowerRest(s.substring(1))}';
+}

@@ -346,7 +346,8 @@ class Translator {
     }
   }
 
-  String _typedef(String name, String type) => 'alias $name = $type';
+  String _typedef(String name, String type) =>
+      'pub alias ${lower(name)} = $type;\n';
 
   String _topLevelGetter(String dartName, String getterName) =>
       'pub extern $getterName(): ${_typeReference(dartName)}\n\tc inline "(topLevelGet($getterName))"';
@@ -369,6 +370,7 @@ class Translator {
     if (url == null) {
       if (symbol.startsWith('JS')) {
         url = 'dart:js_interop';
+        url = null;
       }
       // Else is a core type, so no import required.
     } else if (url == _currentlyTranslatingUrl) {
@@ -378,13 +380,16 @@ class Translator {
     }
     // Replace `JSUndefined` with `JSVoid` in return types.
     if (isReturn && symbol == 'JSUndefined') {
-      symbol = 'JSVoid';
+      symbol = '()';
     }
     // In the IDL, `any` is always nullable, and thus so is `JSAny`.
     if (symbol == 'JSAny') {
       isNullable = true;
+      symbol = 'jsObject';
     }
-    final fullType = url != null ? '$url/$symbol' : symbol;
+    final fullType = url != null
+        ? '${url.replaceAll('.kk', '')}/${lower(symbol)}'
+        : lower(symbol);
     return isNullable ? 'maybe<$fullType>' : fullType;
   }
 
@@ -399,32 +404,46 @@ class Translator {
 
   T _overridableMember<T>(
       _OverridableMember member,
-      T Function(
-              List<String> requiredParameters, List<String> optionalParameters)
+      T Function(List<(String, String)> requiredParameters,
+              List<(String, String)> optionalParameters)
           generator) {
-    final requiredParameters = <String>[];
-    final optionalParameters = <String>[];
+    final requiredParameters = <(String, String)>[];
+    final optionalParameters = <(String, String)>[];
     for (final rawParameter in member.parameters) {
-      final parameter = '${_parameterName(rawParameter.name)}: '
+      final name = _parameterName(rawParameter.name);
+      final parameter = '${_parameterName(rawParameter.name)}\': '
           '${_typeToTypeReference(rawParameter.type, isReturn: false)}'
           '${rawParameter.type.isNullable ? ' =  Nothing' : ''}';
       if (rawParameter.isOptional) {
-        optionalParameters.add(parameter);
+        optionalParameters.add(('$name\'', parameter));
       } else {
-        requiredParameters.add(parameter);
+        requiredParameters.add(('$name\'', parameter));
       }
     }
     return generator(requiredParameters, optionalParameters);
   }
 
-  String _constructor(_OverridableConstructor constructor, String typeName) => _overridableMember<
-          String>(
-      constructor,
-      (requiredParameters, optionalParameters) =>
-          'pub extern new${typeName.snakeToPascal}($requiredParameters, $optionalParameters)');
+  String parameters(Iterable<String> params) =>
+      params.isEmpty ? '' : params.join(', ');
+
+  String _constructor(_OverridableConstructor constructor, String typeName) =>
+      _overridableMember<String>(constructor,
+          (requiredParameters, optionalParameters) {
+        final total2 = [
+          ...requiredParameters.map((e) => e.$2),
+          ...optionalParameters.map((e) => e.$2)
+        ];
+        final total1 = [
+          ...requiredParameters.map((e) => e.$1),
+          ...optionalParameters.map((e) => e.$1)
+        ];
+        return 'pub inline fun new${typeName.snakeToPascal}(${parameters(total2)})\n'
+            '  newJsObject${total1.length}("${typeName.snakeToPascal}"${total1.isNotEmpty ? ', ' : ''}${total1.join(', ')})"\n';
+      });
 
   String _objectLiteral(List<idl.Member> members, String objectName) {
     final optionalParameters = <String>[];
+    final optionalParameterNames = <String>[];
     for (final member in members) {
       // We currently only lower dictionaries to object literals, and
       // dictionaries can only have 'field' members.
@@ -437,8 +456,22 @@ class Translator {
           : '${_parameterName(field.name.toDart)}:'
               ' maybe<${_idlTypeToTypeReference(field.idlType, isReturn: false)}> = Nothing';
       optionalParameters.add(parameter);
+      optionalParameterNames.add(_parameterName(field.name.toDart));
     }
-    return 'pub extern new${objectName.snakeToPascal}($optionalParameters)';
+    return 'pub fun new${objectName.snakeToPascal}(${parameters(optionalParameters)})\n'
+        '  val obj = newJsObject();\n${members.map((i) {
+      final field = i as idl.Field;
+      final isRequired = field.required.toDart;
+      final name = _parameterName(field.name.toDart);
+      if (isRequired) {
+        return '  setJsObjectField(obj, "$name", $name);';
+      } else {
+        return '  match $name\n'
+            '    Just(it) -> setJsObjectField(obj, "$name", it)\n'
+            '    Nothing -> ()\n';
+      }
+    }).join()}\n'
+        '  ${objectName.snakeToPascal}(obj);\n';
   }
 
   _MemberName _memberName(String name) {
@@ -451,31 +484,43 @@ class Translator {
     return _MemberName(memberName, jsOverride);
   }
 
-  String _operation(_OverridableOperation operation) {
+  String _operation(_OverridableOperation operation, String typeName) {
     final memberName = _memberName(operation.name);
     final name = memberName.name;
-    return _overridableMember<String>(
-        operation,
-        (requiredParameters, optionalParameters) =>
-            'pub extern $name(${operation.isStatic ? '' : 'this: js_object,'}'
-            ' $requiredParameters, $optionalParameters)');
+    return _overridableMember<String>(operation,
+        (requiredParameters, optionalParameters) {
+      final allParams = [
+        if (!operation.isStatic) 'obj: $typeName',
+        ...requiredParameters.map((e) => e.$2),
+        ...optionalParameters.map((e) => e.$2)
+      ];
+      final allParams1 = [
+        if (!operation.isStatic) 'obj.obj',
+        '"$name"',
+        ...requiredParameters.map((e) => '${e.$1}.obj'),
+        ...optionalParameters.map((e) => '${e.$1}.obj')
+      ];
+      return 'pub inline fun $name(${parameters(allParams)}): web ${_typeToTypeReference(operation.returnType, isReturn: true)}\n'
+          '  jsOperation${allParams1.length}(${allParams1.join(', ')})\n';
+    });
   }
 
   List<String> _getterSetter(
       {required String fieldName,
       required String Function({required bool isReturn}) getType,
+      required String objType,
       required bool isStatic,
       required bool readOnly}) {
     final memberName = _memberName(fieldName);
     final name = memberName.name;
-    final thisParam = isStatic ? '' : '#1, ';
-    final valueParam = isStatic ? '#1' : '#2';
+    final thisParam = isStatic ? '$objType, ' : 'obj.obj, ';
+    final static = isStatic ? 'Static ' : 'Object';
     return [
       if (!readOnly)
-        'pub extern set${name.snakeToPascal}(${isStatic ? '' : 'this: js_object'}, value: ${getType(isReturn: false)}): web ()\n\t'
-            'c inline "setObjectField(${thisParam}$valueParam)"',
-      'pub extern get${name.snakeToPascal}(${isStatic ? '' : 'this: js_object'}): web ${getType(isReturn: true)}\n\t'
-          'c inline "getObjectField($thisParam\\"${name}\\")"',
+        'pub inline fun ${name.snakeToCamel}(${isStatic ? '' : 'obj: $objType'}, value: ${getType(isReturn: false)}): web ()\n'
+            '  setJs${static}Field($thisParam"$name", value.obj)\n',
+      'pub inline fun ${name.snakeToCamel}(${isStatic ? '' : 'obj: $objType'}): web ${getType(isReturn: true)}\n'
+          '  getJs${static}Field($thisParam"$name")\n',
     ];
   }
 
@@ -483,42 +528,48 @@ class Translator {
           {required String fieldName,
           required idl.IDLType type,
           required bool isStatic,
+          required String objType,
           required bool readOnly}) =>
       _getterSetter(
           fieldName: fieldName,
+          objType: objType,
           getType: ({required bool isReturn}) =>
               _idlTypeToTypeReference(type, isReturn: isReturn),
           isStatic: isStatic,
           readOnly: readOnly);
 
-  List<String> _attribute(idl.Attribute attribute) => _getterSetterWithIDLType(
-      fieldName: attribute.name.toDart,
-      type: attribute.idlType,
-      readOnly: attribute.readonly.toDart,
-      isStatic: attribute.special.toDart == 'static');
+  List<String> _attribute(idl.Attribute attribute, String objType) =>
+      _getterSetterWithIDLType(
+          fieldName: attribute.name.toDart,
+          type: attribute.idlType,
+          objType: objType,
+          readOnly: attribute.readonly.toDart,
+          isStatic: attribute.special.toDart == 'static');
 
   String _constant(idl.Constant constant) =>
-      'pub extern ${constant.name.toDart}():'
-      ' ${_idlTypeToTypeReference(constant.idlType, isReturn: true)}\n\t'
-      'c inline "getConstant(\\"${constant.name.toDart}\\")"';
+      'pub inline fun ${lower(constant.name.toDart.snakeToCamel)}():'
+      ' ${_idlTypeToTypeReference(constant.idlType, isReturn: true)}\n'
+      '  getConstant("${constant.name.toDart}")\n';
 
-  List<String> _field(idl.Field field) => _getterSetterWithIDLType(
-      fieldName: field.name.toDart,
-      type: field.idlType,
-      readOnly: false,
-      isStatic: false);
+  List<String> _field(idl.Field field, String objType) =>
+      _getterSetterWithIDLType(
+          fieldName: field.name.toDart,
+          type: field.idlType,
+          objType: objType,
+          readOnly: false,
+          isStatic: false);
 
-  List<String> _member(idl.Member member) {
+  List<String> _member(idl.Member member, String objType) {
     final type = member.type.toDart;
     switch (type) {
       case 'operation':
         throw Exception('Should be handled explicitly.');
       case 'attribute':
-        return _attribute(member as idl.Attribute);
+        return _attribute(member as idl.Attribute, objType);
       case 'const':
         return [_constant(member as idl.Constant)];
       case 'field':
-        return _field(member as idl.Field);
+        return _field(member as idl.Field, objType);
       case 'iterable':
       case 'maplike':
       case 'setlike':
@@ -529,16 +580,17 @@ class Translator {
     }
   }
 
-  List<String> _members(List<idl.Member> members) =>
-      [for (final member in members) ..._member(member)];
+  List<String> _members(List<idl.Member> members, String objType) =>
+      [for (final member in members) ..._member(member, objType)];
 
-  List<String> _operations(List<_OverridableOperation> operations) =>
-      [for (final operation in operations) _operation(operation)];
+  List<String> _operations(
+          List<_OverridableOperation> operations, String typeName) =>
+      [for (final operation in operations) _operation(operation, typeName)];
 
   String _extension(String name, List<_OverridableOperation> operations,
           List<idl.Member> members) =>
-      _operations(operations)
-          .followedBy(_members(members))
+      _operations(operations, name)
+          .followedBy(_members(members, name))
           .followedBy(name == 'CSSStyleDeclaration'
               ? _cssStyleDeclarationProperties()
               : [])
@@ -547,6 +599,7 @@ class Translator {
   List<String> _cssStyleDeclarationProperties() => [
         for (final style in _cssStyleDeclarations)
           ..._getterSetter(
+              objType: 'cSSStyleDeclaration',
               fieldName: style,
               getType: ({required bool isReturn}) => 'string',
               isStatic: false,
@@ -564,12 +617,11 @@ class Translator {
     required bool isAbstract,
     required bool isObjectLiteral,
   }) =>
-      'struct $dartClassName\n{'
-      '${members.map((m) => m.type.toDart == 'field' ? '  ${(m as idl.Field).name.toDart}: ${_idlTypeToTypeReference(m.idlType, isReturn: false)}' : '').join(',\n')}\n'
-      '}\n'
+      'pub value struct $dartClassName\n  obj: jsObject\n\n'
+      // '${members.where((m) => m.type.toDart == 'field').map((m) => '\n\t${(m as idl.Field).name.toDart}: ${_idlTypeToTypeReference(m.idlType, isReturn: false)}').join()};\n\n'
       // TODO: cast methods for implements?
-      '${isObjectLiteral ? _objectLiteral(members, dartClassName) : constructor != null ? _constructor(constructor, dartClassName) : ''}\n'
-      '${_operations(staticOperations).followedBy(_members(staticMembers))}\n';
+      '${isObjectLiteral ? _objectLiteral(members, dartClassName) : constructor != null ? _constructor(constructor, dartClassName) : ''}'
+      '${_operations(staticOperations, '').followedBy(_members(staticMembers, '')).join('\n')}';
 
   List<String> _interfacelike(idl.Interfacelike idlInterfacelike) {
     final name = idlInterfacelike.name.toDart;
@@ -581,7 +633,7 @@ class Translator {
 
     // Namespaces have lowercase names. We also translate them to
     // private classes, and make their first character uppercase in the process.
-    final dartClassName = isNamespace ? '\$${capitalize(jsName)}' : jsName;
+    final dartClassName = isNamespace ? '\$$jsName}' : lower(jsName);
 
     // We create a getter for namespaces with the expected name. We also create
     // getters for a few pre-defined singleton classes.
@@ -613,11 +665,13 @@ class Translator {
     ];
   }
 
-  String _library(_Library library) => '${licenseHeader.map((c) => "//$c").join("\n")}\n'
-      '${library.typedefs.map((t) => _typedef(t.name.toDart, _typeRaw(t.idlType))).join('\n')}\n'
-      '${library.callbacks.map((c) => _typedef(c.name.toDart, 'JSFunction')).join('\n')}\n'
-      '${library.callbackInterfaces.map((c) => _typedef(c.name.toDart, 'JSFunction')).join('\n')}\n'
-      '${library.enums.map((e) => _typedef(e.name.toDart, 'String')).join('\n')}\n'
+  String _library(_Library library) =>
+      '${licenseHeader.map((c) => "//$c").join("\n")}\n'
+      'import web/wasm\n'
+      '${library.typedefs.map((t) => _typedef(t.name.toDart, _typeRaw(t.idlType))).join('\n\n')}\n'
+      '${library.callbacks.map((c) => _typedef(c.name.toDart, 'jsFunction')).join('\n\n')}\n'
+      '${library.callbackInterfaces.map((c) => _typedef(c.name.toDart, 'jsFunction')).join('\n\n')}\n'
+      '${library.enums.map((e) => _typedef(e.name.toDart, 'string')).join('\n\n')}\n'
       '${library.interfacelikes.expand(_interfacelike).join('\n')}\n';
 
   String generateRootImport(Iterable<String> files) =>
